@@ -1,8 +1,255 @@
 ---
-title: "Activity 8 - Mini-competition"
-output: github_document
+title: "GLM MC"
+author: "Brooke Walters"
+date: "`r Sys.Date()`"
+output: html_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+```{r}
+library(tidymodels)
+library(tidyverse)
 ```
+
+
+```{r message=FALSE, warning=FALSE}
+library(readr)
+inventory1 <- read_csv("/home/knightsa/STA_631/Activities/activity08-mini-competition/competition-files/inventory.csv")
+```
+
+make new variables
+categorize the data into seasons
+```{r}
+
+# Add a new column to indicate which chunk of 9 weeks each week belongs to
+inventory1 <- inventory1 %>%
+  mutate(sales_period = cut(week, breaks = seq(0, 54, 9), labels = FALSE, include.lowest = TRUE))
+
+```
+
+
+create a totals sales column for comparison (to be omitted later)
+```{r}
+# Calculate total sales for each item in each chunk
+salesp<- inventory1 %>%
+  group_by(item_no, sales_period) %>%
+  summarise(total_sold = sum(sold, na.rm = TRUE), .groups = "drop")
+
+```
+
+
+# create an average sales column for comparison (to be omitted later)
+```{r}
+# Calculate the yearly average for each item
+average_sales <- salesp %>%
+  group_by(item_no) %>%
+  summarise(average_yearly_sales = mean(total_sold))
+
+# Join this back to the original data frame
+salesp <- left_join(salesp, average_sales, by = "item_no")
+```
+
+
+create a total sales column (to be omitted later)
+```{r}
+# Calculate the yearly total for each item
+total_sales <- salesp %>%
+  group_by(item_no) %>%
+  summarise(yearly_sales = sum(total_sold))
+
+# Join this back to the original data frame
+salesp <- left_join(salesp, total_sales, by = "item_no")
+```
+
+
+compare sales to the average (to be omitted later)
+```{r}
+
+# Define your threshold as 20% of the average
+threshold <- 0.50
+
+salesp <- salesp %>%
+  mutate(
+    season_to_avg = case_when(
+      total_sold > (1 + threshold) * average_yearly_sales ~ "Significantly higher",
+      total_sold < (1 - threshold) * average_yearly_sales ~ "Significantly lower",
+      TRUE ~ "Average"
+    )
+  )
+
+```
+
+
+determines if the sales product is sold evenly thoughout the year
+```{r}
+# Creating "year_round_product" column
+salesp <- salesp %>%
+  group_by(item_no) %>%
+  mutate(year_round_product = ifelse(sum(season_to_avg == "Average") >= 3, 1, 0)) %>%
+  ungroup()
+```
+
+
+determines if the product is sold mostly during one point in the year 51% of the sales are sold in the one sales period
+```{r}
+# Create the 'main_season' column
+salesp <- salesp %>%
+  group_by(item_no) %>%
+  mutate(in_seasonal_dominance = ifelse(total_sold / sum(total_sold) > 0.51, 1, 0)) %>%
+  ungroup()
+
+```
+
+
+
+determines if the product is sold 40% in one sales period
+```{r}
+# Create the 'secondary_season' column
+salesp <- salesp %>%
+  group_by(item_no) %>%
+  mutate(in_secondary_seasonal_dominance = ifelse(year_round_product == 0 & in_seasonal_dominance == 0 & total_sold / yearly_sales > 0.39, 1, 0)) %>%
+  ungroup()
+
+```
+
+
+determins if the product makes up the top 10% of sales (best sellers)
+```{r}
+# Calculate the top 10% threshold
+top_10_threshold <- quantile(salesp$yearly_sales, 0.9)
+
+# Create the 'hv_product' column
+salesp <- salesp %>%
+  mutate(hv_product = ifelse(yearly_sales >= top_10_threshold, 1, 0))
+
+
+```
+
+```{r}
+salesp %>% 
+  filter(hv_product == 1) %>% 
+  count(item_no)
+```
+
+
+```{r}
+glimpse(salesp)
+```
+
+```{r}
+salesp %>%
+  ggplot(aes(x=sales_period, y=total_sold, color=factor(hv_product))) +
+  geom_jitter(alpha = 0.4, size = 2)
+```
+
+
+```{r}
+salesp1 <- salesp %>% 
+  select(-average_yearly_sales, -yearly_sales, -season_to_avg)
+```
+
+
+```{r}
+write.csv(salesp1, "wrangled_inventory.csv")
+```
+
+
+```{r}
+head(salesp1)
+```
+```{r}
+recipe <- recipe(total_sold ~ item_no + sales_period + year_round_product + in_seasonal_dominance + in_secondary_seasonal_dominance + hv_product, data = salesp1)
+
+```
+
+```{r}
+model_spec <- linear_reg() %>% 
+  set_engine("glm") %>% 
+  set_mode("regression")
+```
+
+
+```{r}
+workflow <- workflow() %>% 
+  add_model(model_spec) %>% 
+  add_recipe(recipe)
+```
+
+```{r}
+model <- fit(workflow, data = salesp1)
+
+model
+```
+
+```{r}
+summary(model)
+```
+```{r}
+model_fit <- extract_fit_parsnip(model)
+```
+
+```{r}
+summary(model_fit)
+```
+
+```{r}
+# Assuming your model is named 'model' and your data is stored in 'salesp1'
+
+# Generate predicted values
+predicted_values <- predict(model, new_data = salesp1)
+
+# Combine the predicted values with the actual values
+comparison <- data.frame(Actual = salesp1$total_sold, Predicted = predicted_values)
+
+# Print the comparison
+print(comparison)
+
+```
+```{r}
+comparison %>% 
+  filter(Actual == 0)
+```
+
+```{r}
+prediction_table %>% 
+  filter(total_sold == 0)
+```
+
+
+```{r}
+prediction_table <- merge(x = salesp1, y = comparison, by.x = "total_sold" , by.y = "Actual")
+```
+
+```{r}
+# reordering the columns so item sold is next to predicted
+
+prediction_table <- prediction_table[,c(2:7, 1, 8)]
+
+```
+
+```{r}
+#A dataset with the items our model actually predicts (No negative predictions)
+ items_with_pos_prediction <- prediction_table %>% 
+  mutate( diff = total_sold - .pred) %>% 
+  filter(.pred > 0)
+```
+
+```{r}
+
+items_with_pos_prediction <- items_with_pos_prediction %>%
+  mutate(
+    predict_status = case_when(
+      diff > 0 ~ "Under Predict",
+      diff < 0 ~ "Over Predict",
+      diff == 0 ~ "Predicted"
+    )
+  )
+
+```
+
+```{r}
+#eliminate diff column to avoid confusion
+
+items_with_pos_prediction <- items_with_pos_prediction[,c(1:8,10)] 
+
+```
+
